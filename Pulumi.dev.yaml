@@ -3,3 +3,7 @@ config:
   aws:region: us-east-1
   vpc-cidr: 10.0.0.0/16
   igw-route: 0.0.0.0/0
+  ipv4-cidr: 0.0.0.0/0
+  ipv6-cidr: ::/0
+  dev-account-id: "395796702243"
+  ssh-key: demo-key
