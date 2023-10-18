@@ -16,6 +16,8 @@ import (
 func main() {
 	pulumi.Run(func(ctx *pulumi.Context) error {
 
+		var ports []int
+
 		config := config.New(ctx, "")
 		vpc_cidr := config.Require("vpc-cidr")
 		igw_route := config.Require("igw-route")
@@ -23,8 +25,7 @@ func main() {
 		ipv6_cidr := config.Require("ipv6-cidr")
 		ssh_key := config.Require("ssh-key")
 		ami_id := config.Require("ami-id")
-
-		ports := []int{80, 22, 443, 8080}
+		config.RequireObject("ports", &ports)
 
 		parts := strings.Split(vpc_cidr, "/")
 		ip := parts[0]
