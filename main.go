@@ -9,6 +9,7 @@ import (
 	"github.com/c-robinson/iplib"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
@@ -17,7 +18,6 @@ func main() {
 	pulumi.Run(func(ctx *pulumi.Context) error {
 
 		var ports []int
-
 		config := config.New(ctx, "")
 		vpc_cidr := config.Require("vpc-cidr")
 		igw_route := config.Require("igw-route")
@@ -25,6 +25,16 @@ func main() {
 		ipv6_cidr := config.Require("ipv6-cidr")
 		ssh_key := config.Require("ssh-key")
 		ami_id := config.Require("ami-id")
+		ec2_instance_type := config.Require("ec2-instance-type")
+		db_engine := config.Require("db-engine-name")
+		db_family := config.Require("db-family")
+		db_engine_version := config.Require("db-engine-version")
+		db_instance_class := config.Require("db-instance-class")
+		db_name := config.Require("db-name")
+		db_storage_size := config.RequireInt("db-storage-size")
+		db_master_user := config.Require("db-master-user")
+		db_master_password := config.Require("db-master-password")
+
 		config.RequireObject("ports", &ports)
 
 		parts := strings.Split(vpc_cidr, "/")
@@ -41,7 +51,7 @@ func main() {
 		}
 
 		courseTag := pulumi.String("CSYE-6225")
-		assignmentTag := pulumi.String("assign-5")
+		assignmentTag := pulumi.String("Assign-6")
 
 		// tags := pulumi.StringMap{"course": pulumi.String("CSYE-6225"), "assign": pulumi.String("assign-5")}
 
@@ -196,7 +206,7 @@ func main() {
 		}
 
 		// setup security group
-		webappSg, err := ec2.NewSecurityGroup(ctx, "application security group", &ec2.SecurityGroupArgs{
+		webappSg, err := ec2.NewSecurityGroup(ctx, "application-security-group", &ec2.SecurityGroupArgs{
 			VpcId:       vpc.ID(),
 			Description: pulumi.String("application security group"),
 			Ingress:     sgIngressRules,
@@ -210,23 +220,140 @@ func main() {
 			return err
 		}
 
-		// spin up an EC2 instance
-		_, err = ec2.NewInstance(ctx, "webapp", &ec2.InstanceArgs{
-			InstanceType:          pulumi.String("t2.micro"),
-			VpcSecurityGroupIds:   pulumi.StringArray{webappSg.ID()},
-			SubnetId:              publicSubnets[0].ID(),
-			KeyName:               pulumi.String(ssh_key),
-			Ami:                   pulumi.String(ami_id),
-			DisableApiTermination: pulumi.Bool(false),
+		dbSecurityGroup, err := ec2.NewSecurityGroup(ctx, "database-security-group", &ec2.SecurityGroupArgs{
+			VpcId: vpc.ID(),
+			Ingress: ec2.SecurityGroupIngressArray{
+				&ec2.SecurityGroupIngressArgs{
+					SecurityGroups: pulumi.StringArray{
+						webappSg.ID(),
+					},
+					Protocol: pulumi.String("tcp"),
+					FromPort: pulumi.Int(3306),
+					ToPort:   pulumi.Int(3306),
+				},
+			},
 			Tags: pulumi.StringMap{
 				"course": courseTag,
 				"assign": assignmentTag,
-				"Name":   pulumi.String("webapp"),
+				"Name":   pulumi.String("database-security-group"),
 			},
 		})
 		if err != nil {
 			return err
 		}
+
+		_, err = ec2.NewSecurityGroupRule(ctx, "application-security-group-egress-rule", &ec2.SecurityGroupRuleArgs{
+			FromPort:              pulumi.Int(3306),
+			ToPort:                pulumi.Int(3306),
+			Protocol:              pulumi.String("tcp"),
+			Type:                  pulumi.String("egress"),
+			SourceSecurityGroupId: dbSecurityGroup.ID(),
+			SecurityGroupId:       webappSg.ID(),
+		})
+		if err != nil {
+			return err
+		}
+
+		// create a string array to store the subnet ids for the db subnet group
+		var subnetIds pulumi.StringArray
+		for i := range privateSubnets {
+			subnetIds = append(subnetIds, privateSubnets[i].ID())
+		}
+
+		dbSubnetGroup, err := rds.NewSubnetGroup(ctx, "db-subnet-group", &rds.SubnetGroupArgs{
+			SubnetIds: subnetIds,
+			Tags: pulumi.StringMap{
+				"course": courseTag,
+				"assign": assignmentTag,
+				"Name":   pulumi.String("db-subnet-group"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		dbParamGroup, err := rds.NewParameterGroup(ctx, "param-group", &rds.ParameterGroupArgs{
+			Family: pulumi.String(db_family),
+			Tags: pulumi.StringMap{
+				"course": courseTag,
+				"assign": assignmentTag,
+				"Name":   pulumi.String("db-parameter-group"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		db, err := rds.NewInstance(ctx, "db", &rds.InstanceArgs{
+			AllocatedStorage:    pulumi.Int(db_storage_size),
+			Engine:              pulumi.String(db_engine),
+			EngineVersion:       pulumi.String(db_engine_version),
+			InstanceClass:       pulumi.String(db_instance_class),
+			DbName:              pulumi.String(db_name),
+			Username:            pulumi.String(db_master_user),
+			Password:            pulumi.String(db_master_password),
+			MultiAz:             pulumi.Bool(false),
+			PubliclyAccessible:  pulumi.Bool(false),
+			DbSubnetGroupName:   dbSubnetGroup.Name,
+			ParameterGroupName:  dbParamGroup.Name,
+			VpcSecurityGroupIds: pulumi.StringArray{dbSecurityGroup.ID()},
+			SkipFinalSnapshot:   pulumi.Bool(true),
+			Tags: pulumi.StringMap{
+				"course": courseTag,
+				"assign": assignmentTag,
+				"Name":   pulumi.String("csye6225"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		userData := `#!/bin/bash
+{
+	echo "spring.jpa.hibernate.ddl-auto=create-drop"
+	echo "spring.datasource.url=jdbc:mariadb://${HOST}/${DB_NAME}"
+	echo "spring.datasource.username=${DB_USER}"
+	echo "spring.datasource.password=${DB_PASSWORD}"
+	echo "spring.datasource.driver-class-name=org.mariadb.jdbc.Driver"
+	echo "spring.jpa.show-sql:true"
+	echo "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MariaDBDialect"
+	echo "application.config.csv-file=\${USERS_CSV:users.csv}"
+	echo "logging.level.org.springframework.security=info"
+} >> /opt/csye6225/application.properties
+sudo chown csye6225:csye6225 /opt/csye6225/application.properties
+sudo chmod 640 /opt/csye6225/application.properties
+`
+
+		userData = strings.Replace(userData, "${DB_NAME}", db_name, -1)
+		userData = strings.Replace(userData, "${DB_USER}", db_master_user, -1)
+		userData = strings.Replace(userData, "${DB_PASSWORD}", db_master_password, -1)
+
+		// spin up an EC2 instance
+		_, err = ec2.NewInstance(ctx, "webapp", &ec2.InstanceArgs{
+			InstanceType:          pulumi.String(ec2_instance_type),
+			VpcSecurityGroupIds:   pulumi.StringArray{webappSg.ID()},
+			SubnetId:              publicSubnets[0].ID(),
+			KeyName:               pulumi.String(ssh_key),
+			Ami:                   pulumi.String(ami_id),
+			DisableApiTermination: pulumi.Bool(false),
+			UserData: db.Endpoint.ApplyT(
+				func(args interface{}) (string, error) {
+					endpoint := args.(string)
+					userData = strings.Replace(userData, "${HOST}", endpoint, -1)
+					return userData, nil
+				},
+			).(pulumi.StringOutput),
+			Tags: pulumi.StringMap{
+				"course": courseTag,
+				"assign": assignmentTag,
+				"Name":   pulumi.String("webapp"),
+			},
+		}, pulumi.DependsOn([]pulumi.Resource{db}))
+		if err != nil {
+			return err
+		}
+
+		ctx.Export("DB Endpoint", db.Endpoint)
 
 		return nil
 	})

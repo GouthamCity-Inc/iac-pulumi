@@ -5,8 +5,17 @@ config:
   igw-route: 0.0.0.0/0
   ipv4-cidr: 0.0.0.0/0
   ipv6-cidr: ::/0
-  ssh-key: dev-key
-  ami-id: ami-0d230b46cb0b6f4f4
+  ssh-key: demo-key
+  ami-id: ami-08296b2431335c8a6
+  ec2-instance-type: t2.micro
+  db-engine-name: mariadb
+  db-family: mariadb10.11
+  db-engine-version: 10.11.5
+  db-instance-class: db.t3.micro
+  db-storage-size: 20
+  db-name: csye6225
+  db-master-user: csye6225
+  db-master-password: M@ri4DB$ec#ureP@ssw0rd
   ports:
     - 22
     - 80

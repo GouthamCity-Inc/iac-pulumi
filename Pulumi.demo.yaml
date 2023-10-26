@@ -6,7 +6,16 @@ config:
   ipv4-cidr: 0.0.0.0/0
   ipv6-cidr: ::/0
   ssh-key: demo-key
-  ami-id: ami-0d230b46cb0b6f4f4
+  ami-id: ami-0e90416449d5e7bc1
+  ec2-instance-type: t2.micro
+  db-engine-name: mariadb
+  db-family: mariadb10.11
+  db-engine-version: 10.11.5
+  db-instance-class: db.t3.micro
+  db-storage-size: 20
+  db-name: csye6225
+  db-master-user: csye6225
+  db-master-password: csye6225
   ports:
     - 22
     - 80
