@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -9,7 +10,9 @@ import (
 	"github.com/c-robinson/iplib"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/iam"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/route53"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
@@ -34,6 +37,7 @@ func main() {
 		db_storage_size := config.RequireInt("db-storage-size")
 		db_master_user := config.Require("db-master-user")
 		db_master_password := config.Require("db-master-password")
+		domain_name := config.Require("domain-name")
 
 		config.RequireObject("ports", &ports)
 
@@ -284,6 +288,55 @@ func main() {
 			return err
 		}
 
+		policyString, err := json.Marshal(map[string]interface{}{
+			"Version": "2012-10-17",
+			"Statement": []map[string]interface{}{
+				{
+					"Action": "sts:AssumeRole",
+					"Effect": "Allow",
+					"Sid":    "",
+					"Principal": map[string]interface{}{
+						"Service": "ec2.amazonaws.com",
+					},
+				},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		defaultPolicy := string(policyString)
+
+		// Create a new IAM role
+		role, err := iam.NewRole(ctx, "cloudwatch-agent-role", &iam.RoleArgs{
+			AssumeRolePolicy: pulumi.String(defaultPolicy),
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String("cloudwatch-agent-role"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// Create a new IAM instance profile
+		instanceProfile, err := iam.NewInstanceProfile(ctx, "cloudwatch-instance-profile", &iam.InstanceProfileArgs{
+			Role: role.Name,
+			Tags: pulumi.StringMap{
+				"Name": pulumi.String("cloudwatch-instance-profile"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// Attach the policy to the cloudwatch role
+		_, err = iam.NewRolePolicyAttachment(ctx, "cloudwatch-agent-policy", &iam.RolePolicyAttachmentArgs{
+			Role:      role.Name,
+			PolicyArn: pulumi.String("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"),
+		})
+		if err != nil {
+			return err
+		}
+
 		db, err := rds.NewInstance(ctx, "db", &rds.InstanceArgs{
 			AllocatedStorage:    pulumi.Int(db_storage_size),
 			Engine:              pulumi.String(db_engine),
@@ -322,6 +375,13 @@ func main() {
 } >> /opt/csye6225/application.properties
 sudo chown csye6225:csye6225 /opt/csye6225/application.properties
 sudo chmod 640 /opt/csye6225/application.properties
+{
+	sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+		-a fetch-config \
+		-m ec2 \
+		-c file:/opt/aws/amazon-cloudwatch-agent/etc/cloudwatch-config.json \
+		-s
+}
 `
 
 		userData = strings.Replace(userData, "${DB_NAME}", db_name, -1)
@@ -329,13 +389,14 @@ sudo chmod 640 /opt/csye6225/application.properties
 		userData = strings.Replace(userData, "${DB_PASSWORD}", db_master_password, -1)
 
 		// spin up an EC2 instance
-		_, err = ec2.NewInstance(ctx, "webapp", &ec2.InstanceArgs{
+		app_server, err := ec2.NewInstance(ctx, "webapp", &ec2.InstanceArgs{
 			InstanceType:          pulumi.String(ec2_instance_type),
 			VpcSecurityGroupIds:   pulumi.StringArray{webappSg.ID()},
 			SubnetId:              publicSubnets[0].ID(),
 			KeyName:               pulumi.String(ssh_key),
 			Ami:                   pulumi.String(ami_id),
 			DisableApiTermination: pulumi.Bool(false),
+			IamInstanceProfile:    instanceProfile.ID(),
 			UserData: db.Endpoint.ApplyT(
 				func(args interface{}) (string, error) {
 					endpoint := args.(string)
@@ -349,6 +410,39 @@ sudo chmod 640 /opt/csye6225/application.properties
 				"Name":   pulumi.String("webapp"),
 			},
 		}, pulumi.DependsOn([]pulumi.Resource{db}))
+		if err != nil {
+			return err
+		}
+
+		_, err = ec2.NewSecurityGroupRule(ctx, "application-security-group-port-egress-rule", &ec2.SecurityGroupRuleArgs{
+			Type:            pulumi.String("egress"),
+			FromPort:        pulumi.Int(443),
+			ToPort:          pulumi.Int(443),
+			Protocol:        pulumi.String("tcp"),
+			SecurityGroupId: webappSg.ID(),
+			CidrBlocks:      pulumi.StringArray{pulumi.String(ipv4_cidr)},
+			Ipv6CidrBlocks:  pulumi.StringArray{pulumi.String(ipv6_cidr)},
+		})
+		if err != nil {
+			return err
+		}
+
+		zoneID, err := route53.LookupZone(ctx, &route53.LookupZoneArgs{
+			Name: pulumi.StringRef(domain_name),
+		}, nil)
+
+		if err != nil {
+			return err
+		}
+		// Create a new A Record for the ec2 instance
+		_, err = route53.NewRecord(ctx, "New-A-record", &route53.RecordArgs{
+			Name:           pulumi.String(domain_name),
+			Type:           pulumi.String("A"),
+			Ttl:            pulumi.Int(60),
+			ZoneId:         pulumi.String(zoneID.Id),
+			Records:        pulumi.StringArray{app_server.PublicIp},
+			AllowOverwrite: pulumi.Bool(true),
+		}, pulumi.DependsOn([]pulumi.Resource{app_server}))
 		if err != nil {
 			return err
 		}
