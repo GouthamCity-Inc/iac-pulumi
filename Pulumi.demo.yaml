@@ -17,8 +17,9 @@ config:
   db-master-user: csye6225
   db-master-password: csye6225
   domain-name: demo.gouthamhusky.me
-  ports:
-    - 22
+  alb-ports:
     - 80
     - 443
+  ports:
+    - 22
     - 8080
