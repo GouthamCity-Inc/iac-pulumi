@@ -6,7 +6,7 @@ config:
   ipv4-cidr: 0.0.0.0/0
   ipv6-cidr: ::/0
   ssh-key: demo-key
-  ami-id: ami-09a45d69c96da2abf
+  ami-id: ami-0f75bc4c2e9b103cd
   ec2-instance-type: t2.micro
   db-engine-name: mariadb
   db-family: mariadb10.11

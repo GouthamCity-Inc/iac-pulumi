@@ -457,7 +457,8 @@ sudo chmod 640 /opt/csye6225/application.properties
 			IamInstanceProfile: &ec2.LaunchTemplateIamInstanceProfileArgs{
 				Name: instanceProfile.Name,
 			},
-			VpcSecurityGroupIds: pulumi.StringArray{webappSg.ID()},
+			VpcSecurityGroupIds:   pulumi.StringArray{webappSg.ID()},
+			DisableApiTermination: pulumi.Bool(false),
 			UserData: db.Endpoint.ApplyT(
 				func(args interface{}) (string, error) {
 					endpoint := args.(string)
@@ -495,9 +496,9 @@ sudo chmod 640 /opt/csye6225/application.properties
 			return err
 		}
 
-		privateSubnetIDs := pulumi.StringArray{}
-		for _, subnet := range privateSubnets {
-			privateSubnetIDs = append(privateSubnetIDs, subnet.ID())
+		publicSubnetIDs := pulumi.StringArray{}
+		for _, subnet := range publicSubnets {
+			publicSubnetIDs = append(publicSubnetIDs, subnet.ID())
 		}
 
 		// define the autoscaling group
@@ -506,7 +507,7 @@ sudo chmod 640 /opt/csye6225/application.properties
 			MaxSize:            pulumi.Int(3),
 			MinSize:            pulumi.Int(1),
 			DefaultCooldown:    pulumi.Int(60),
-			VpcZoneIdentifiers: privateSubnetIDs,
+			VpcZoneIdentifiers: publicSubnetIDs,
 			TargetGroupArns: pulumi.StringArray{
 				targetGroup.Arn,
 			},
@@ -568,11 +569,6 @@ sudo chmod 640 /opt/csye6225/application.properties
 			Threshold:          pulumi.Float64(3.0),
 			Tags:               pulumi.StringMap{"Name": pulumi.String("scale-down-alarm")},
 		})
-
-		publicSubnetIDs := pulumi.StringArray{}
-		for _, subnet := range publicSubnets {
-			publicSubnetIDs = append(publicSubnetIDs, subnet.ID())
-		}
 
 		loadBalancer, err := lb.NewLoadBalancer(ctx, "load-balancer", &lb.LoadBalancerArgs{
 			Internal:         pulumi.Bool(false),
