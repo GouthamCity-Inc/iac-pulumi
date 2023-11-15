@@ -450,10 +450,11 @@ sudo chmod 640 /opt/csye6225/application.properties
 
 		// define the launch template
 		launchTemplate, err := ec2.NewLaunchTemplate(ctx, "ec2_launch_template", &ec2.LaunchTemplateArgs{
-			NamePrefix:   pulumi.String("ec2_launch_template"),
-			ImageId:      pulumi.String(ami_id),
-			InstanceType: pulumi.String(ec2_instance_type),
-			KeyName:      pulumi.String(ssh_key),
+			NamePrefix:            pulumi.String("ec2_launch_template"),
+			ImageId:               pulumi.String(ami_id),
+			InstanceType:          pulumi.String(ec2_instance_type),
+			KeyName:               pulumi.String(ssh_key),
+			DisableApiTermination: pulumi.Bool(false),
 			IamInstanceProfile: &ec2.LaunchTemplateIamInstanceProfileArgs{
 				Name: instanceProfile.Name,
 			},
@@ -495,9 +496,9 @@ sudo chmod 640 /opt/csye6225/application.properties
 			return err
 		}
 
-		privateSubnetIDs := pulumi.StringArray{}
-		for _, subnet := range privateSubnets {
-			privateSubnetIDs = append(privateSubnetIDs, subnet.ID())
+		publicSubnetIDs := pulumi.StringArray{}
+		for _, subnet := range publicSubnets {
+			publicSubnetIDs = append(publicSubnetIDs, subnet.ID())
 		}
 
 		// define the autoscaling group
@@ -506,7 +507,7 @@ sudo chmod 640 /opt/csye6225/application.properties
 			MaxSize:            pulumi.Int(3),
 			MinSize:            pulumi.Int(1),
 			DefaultCooldown:    pulumi.Int(60),
-			VpcZoneIdentifiers: privateSubnetIDs,
+			VpcZoneIdentifiers: publicSubnetIDs,
 			TargetGroupArns: pulumi.StringArray{
 				targetGroup.Arn,
 			},
@@ -518,6 +519,16 @@ sudo chmod 640 /opt/csye6225/application.properties
 		if err != nil {
 			return err
 		}
+
+		// Create a tag and attach it to the AutoScaling Group
+		_, _ = autoscaling.NewTag(ctx, "auto-scaling-group-tag", &autoscaling.TagArgs{
+			AutoscalingGroupName: asg.Name, // reference to the previously created AutoScalingGroup
+			Tag: autoscaling.TagTagArgs{
+				Key:               pulumi.String("Name"),
+				Value:             pulumi.String("webapp"),
+				PropagateAtLaunch: pulumi.Bool(true),
+			},
+		})
 
 		// scale up policy
 		scaleUpPolicy, err := autoscaling.NewPolicy(ctx, "scale-up-policy", &autoscaling.PolicyArgs{
@@ -568,11 +579,6 @@ sudo chmod 640 /opt/csye6225/application.properties
 			Threshold:          pulumi.Float64(3.0),
 			Tags:               pulumi.StringMap{"Name": pulumi.String("scale-down-alarm")},
 		})
-
-		publicSubnetIDs := pulumi.StringArray{}
-		for _, subnet := range publicSubnets {
-			publicSubnetIDs = append(publicSubnetIDs, subnet.ID())
-		}
 
 		loadBalancer, err := lb.NewLoadBalancer(ctx, "load-balancer", &lb.LoadBalancerArgs{
 			Internal:         pulumi.Bool(false),
