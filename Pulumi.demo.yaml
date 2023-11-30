@@ -1,12 +1,13 @@
 config:
   aws:profile: demo
+  gcp:project: demo
   aws:region: us-east-1
   vpc-cidr: 10.0.0.0/16
   igw-route: 0.0.0.0/0
   ipv4-cidr: 0.0.0.0/0
   ipv6-cidr: ::/0
   ssh-key: demo-key
-  ami-id: ami-09a45d69c96da2abf
+  ami-id: ami-08a9e893bd5250652
   ec2-instance-type: t2.micro
   db-engine-name: mariadb
   db-family: mariadb10.11
@@ -17,6 +18,15 @@ config:
   db-master-user: csye6225
   db-master-password: csye6225
   domain-name: demo.gouthamhusky.me
+  lambda-deployment-path: /Users/gouthamkanags/Desktop/Northeastern/Cloud/serverless/lambda/my_deployment_package.zip
+  lambda-handler: lambda_handler.lambda_handler
+  gcp-project-id: pelagic-engine-406103
+  gcp-cloud-storage-role: roles/storage.admin
+  smtp-host: smtp.mailgun.org
+  smtp-port: 587
+  smtp-user: postmaster@gouthamhusky.me
+  smtp-password: mailgungoutham
+  sender-email: goutham@gouthamhusky.me
   alb-ports:
     - 80
     - 443

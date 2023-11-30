@@ -9,15 +9,21 @@ import (
 	"strings"
 
 	"github.com/c-robinson/iplib"
+	"github.com/google/uuid"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/alb"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/autoscaling"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/cloudwatch"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/dynamodb"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/ec2"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/iam"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/lambda"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/lb"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/rds"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/route53"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/sns"
+	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/serviceaccount"
+	"github.com/pulumi/pulumi-gcp/sdk/v7/go/gcp/storage"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
@@ -44,6 +50,15 @@ func main() {
 		db_master_user := config.Require("db-master-user")
 		db_master_password := config.Require("db-master-password")
 		domain_name := config.Require("domain-name")
+		deployment_path := config.Require("lambda-deployment-path")
+		lambda_handler := config.Require("lambda-handler")
+		gcp_project_id := config.Require("gcp-project-id")
+		gcp_cloud_storage_role := config.Require("gcp-cloud-storage-role")
+		smtp_host := config.Require("smtp-host")
+		smtp_port := config.Require("smtp-port")
+		smtp_username := config.Require("smtp-user")
+		smtp_password := config.Require("smtp-password")
+		sender_email := config.Require("sender-email")
 
 		config.RequireObject("ports", &ports)
 		config.RequireObject("alb-ports", &alb_ports)
@@ -364,6 +379,14 @@ func main() {
 			return err
 		}
 
+		_, err = iam.NewRolePolicyAttachment(ctx, "sns-publish-policy", &iam.RolePolicyAttachmentArgs{
+			Role:      role.Name,
+			PolicyArn: pulumi.String("arn:aws:iam::aws:policy/AmazonSNSFullAccess"),
+		})
+		if err != nil {
+			return err
+		}
+
 		// Create a new IAM instance profile
 		instanceProfile, err := iam.NewInstanceProfile(ctx, "cloudwatch-instance-profile", &iam.InstanceProfileArgs{
 			Role: role.Name,
@@ -449,8 +472,8 @@ sudo chmod 640 /opt/csye6225/application.properties
 		}
 
 		// define the launch template
-		launchTemplate, err := ec2.NewLaunchTemplate(ctx, "ec2_launch_template", &ec2.LaunchTemplateArgs{
-			NamePrefix:            pulumi.String("ec2_launch_template"),
+		launchTemplate, err := ec2.NewLaunchTemplate(ctx, "ec2-launch-template", &ec2.LaunchTemplateArgs{
+			NamePrefix:            pulumi.String("ec2-launch-template"),
 			ImageId:               pulumi.String(ami_id),
 			InstanceType:          pulumi.String(ec2_instance_type),
 			KeyName:               pulumi.String(ssh_key),
@@ -634,6 +657,236 @@ sudo chmod 640 /opt/csye6225/application.properties
 			},
 			AllowOverwrite: pulumi.Bool(true),
 		}, pulumi.DependsOn([]pulumi.Resource{asg}))
+		if err != nil {
+			return err
+		}
+
+		service_account, err := serviceaccount.NewAccount(ctx, "aws-lambda-service-account", &serviceaccount.AccountArgs{
+			AccountId:   pulumi.String("aws-lambda-service-account"),
+			DisplayName: pulumi.String("aws-lambda-service-account"),
+			Project:     pulumi.String(gcp_project_id),
+		})
+		if err != nil {
+			return err
+		}
+
+		sa_access_key, err := serviceaccount.NewKey(ctx, "service-account-access-key", &serviceaccount.KeyArgs{
+			ServiceAccountId: service_account.Name,
+			PublicKeyType:    pulumi.String("TYPE_X509_PEM_FILE"),
+		})
+		if err != nil {
+			return err
+		}
+
+		newUUID := uuid.New()
+		uuidStr := newUUID.String()
+
+		gcp_bucket, err := storage.NewBucket(ctx, "gcp-bucket", &storage.BucketArgs{
+			Project:                  pulumi.String(gcp_project_id),
+			Name:                     pulumi.String("csyebucket" + uuidStr),
+			PublicAccessPrevention:   pulumi.String("enforced"),
+			Location:                 pulumi.String("US"),
+			StorageClass:             pulumi.String("STANDARD"),
+			ForceDestroy:             pulumi.Bool(true),
+			UniformBucketLevelAccess: pulumi.Bool(true),
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = storage.NewBucketIAMBinding(ctx, "bucket-iam", &storage.BucketIAMBindingArgs{
+			Bucket: gcp_bucket.Name,
+			Role:   pulumi.String(gcp_cloud_storage_role),
+			Members: pulumi.StringArray{
+				service_account.Email.ApplyT(func(args interface{}) (string, error) {
+					email := args.(string)
+					return "serviceAccount:" + email, nil
+				}).(pulumi.StringOutput),
+			},
+		}, pulumi.DependsOn([]pulumi.Resource{service_account, gcp_bucket}))
+		if err != nil {
+			return err
+
+		}
+
+		sns_topic, err := sns.NewTopic(ctx, "csye6225-submissions", &sns.TopicArgs{
+			Name: pulumi.String("csye6225-submissions"),
+		})
+		if err != nil {
+			return err
+		}
+
+		lambda_role, _ := iam.NewRole(ctx, "lambda-role", &iam.RoleArgs{
+			Name: pulumi.String("lambda-role"),
+			AssumeRolePolicy: pulumi.String(`{
+				"Version": "2012-10-17",
+				"Statement": [
+					{
+						"Action": "sts:AssumeRole",
+						"Principal": {
+							"Service": "lambda.amazonaws.com"
+							
+					},
+						"Effect": "Allow",
+						"Sid": ""
+					}
+				]
+			}`),
+		})
+
+		lambda_loggroup, err := cloudwatch.NewLogGroup(ctx, "lambda-log-group", &cloudwatch.LogGroupArgs{
+			RetentionInDays: pulumi.Int(14),
+			Name:            pulumi.String("lambda-log-group"),
+		})
+		if err != nil {
+			return err
+		}
+
+		lambda_logging_policy_document, err := iam.GetPolicyDocument(ctx, &iam.GetPolicyDocumentArgs{
+			Statements: []iam.GetPolicyDocumentStatement{
+				{
+					Effect: pulumi.StringRef("Allow"),
+					Actions: []string{
+						"logs:CreateLogGroup",
+						"logs:CreateLogStream",
+						"logs:PutLogEvents",
+					},
+					Resources: []string{
+						"arn:aws:logs:*:*:*",
+					},
+				},
+			},
+		}, nil)
+		if err != nil {
+			return err
+		}
+
+		lambda_logging_policy, err := iam.NewPolicy(ctx, "lambda-logging-policy", &iam.PolicyArgs{
+			Path:        pulumi.String("/"),
+			Description: pulumi.String("IAM policy for logging from a lambda"),
+			Policy:      pulumi.String(lambda_logging_policy_document.Json),
+		})
+		if err != nil {
+			return err
+		}
+
+		lambda_logs, err := iam.NewRolePolicyAttachment(ctx, "lambdaLogs", &iam.RolePolicyAttachmentArgs{
+			Role:      lambda_role.Name,
+			PolicyArn: lambda_logging_policy.Arn,
+		}, pulumi.DependsOn([]pulumi.Resource{
+			lambda_role,
+			lambda_logging_policy,
+		}))
+
+		if err != nil {
+			return err
+		}
+
+		dynamodb_policy_document, err := iam.GetPolicyDocument(ctx, &iam.GetPolicyDocumentArgs{
+			Statements: []iam.GetPolicyDocumentStatement{
+				{
+					Effect: pulumi.StringRef("Allow"),
+					Actions: []string{
+						"dynamodb:GetItem",
+						"dynamodb:PutItem",
+						"dynamodb:UpdateItem",
+						"dynamodb:DeleteItem",
+						"dynamodb:Scan",
+						"dynamodb:Query",
+					},
+					Resources: []string{
+						"arn:aws:dynamodb:*:*:table/*",
+					},
+				},
+			},
+		}, nil)
+		if err != nil {
+			return err
+		}
+
+		dynamodb_policy, err := iam.NewPolicy(ctx, "dynamodb-policy", &iam.PolicyArgs{
+			Path:        pulumi.String("/"),
+			Description: pulumi.String("IAM policy for dynamodb"),
+			Policy:      pulumi.String(dynamodb_policy_document.Json),
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = iam.NewRolePolicyAttachment(ctx, "dynamodb-policy-attachment", &iam.RolePolicyAttachmentArgs{
+			Role:      lambda_role.Name,
+			PolicyArn: dynamodb_policy.Arn,
+		}, pulumi.DependsOn([]pulumi.Resource{
+			lambda_role,
+			dynamodb_policy,
+		}))
+		if err != nil {
+			return err
+		}
+
+		dynamodb, err := dynamodb.NewTable(ctx, "dynamodb", &dynamodb.TableArgs{
+			Name: pulumi.String("csye6225-submissions-table"),
+			Attributes: dynamodb.TableAttributeArray{
+				&dynamodb.TableAttributeArgs{
+					Name: pulumi.String("id"),
+					Type: pulumi.String("S"),
+				},
+			},
+			HashKey:       pulumi.String("id"),
+			ReadCapacity:  pulumi.Int(5),
+			WriteCapacity: pulumi.Int(5),
+			Tags: pulumi.StringMap{
+				"course": courseTag,
+				"assign": assignmentTag,
+				"Name":   pulumi.String("dynamodb"),
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		lambda_function, err := lambda.NewFunction(ctx, "lambda-function", &lambda.FunctionArgs{
+			Name:    pulumi.String("csye-submissions-lambda"),
+			Handler: pulumi.String(lambda_handler),
+			Role:    lambda_role.Arn,
+			Runtime: pulumi.String("python3.11"),
+			Code:    pulumi.NewFileArchive(deployment_path),
+			Environment: &lambda.FunctionEnvironmentArgs{
+				Variables: pulumi.StringMap{
+					"BUCKET_NAME":        gcp_bucket.Name,
+					"GOOGLE_CREDENTIALS": sa_access_key.PrivateKey,
+					"DYNAMODB_TABLE":     dynamodb.Name,
+					"SMTP_HOST":          pulumi.String(smtp_host),
+					"SMTP_PORT":          pulumi.String(smtp_port),
+					"SMTP_USERNAME":      pulumi.String(smtp_username),
+					"SMTP_PASSWORD":      pulumi.String(smtp_password),
+					"SENDER_EMAIL":       pulumi.String(sender_email),
+				},
+			},
+			Timeout: pulumi.Int(10),
+		}, pulumi.DependsOn([]pulumi.Resource{
+			lambda_logs,
+			lambda_loggroup,
+		}))
+		if err != nil {
+			return err
+		}
+
+		_, err = lambda.NewPermission(ctx, "withSns", &lambda.PermissionArgs{
+			Action:    pulumi.String("lambda:InvokeFunction"),
+			Function:  lambda_function.Name,
+			Principal: pulumi.String("sns.amazonaws.com"),
+			SourceArn: sns_topic.Arn,
+		})
+		if err != nil {
+			return err
+		}
+
+		_, err = sns.NewTopicSubscription(ctx, "lambda-subscription", &sns.TopicSubscriptionArgs{
+			Protocol: pulumi.String("lambda"),
+			Topic:    sns_topic.Arn,
+			Endpoint: lambda_function.Arn,
+		})
 		if err != nil {
 			return err
 		}
