@@ -11,6 +11,7 @@ import (
 	"github.com/c-robinson/iplib"
 	"github.com/google/uuid"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws"
+	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/acm"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/alb"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/autoscaling"
 	"github.com/pulumi/pulumi-aws/sdk/v6/go/aws/cloudwatch"
@@ -472,8 +473,8 @@ sudo chmod 640 /opt/csye6225/application.properties
 		}
 
 		// define the launch template
-		launchTemplate, err := ec2.NewLaunchTemplate(ctx, "ec2-launch-template", &ec2.LaunchTemplateArgs{
-			NamePrefix:            pulumi.String("ec2-launch-template"),
+		launchTemplate, err := ec2.NewLaunchTemplate(ctx, "webapp-launch-template", &ec2.LaunchTemplateArgs{
+			Name:                  pulumi.String("webapp-launch-template"),
 			ImageId:               pulumi.String(ami_id),
 			InstanceType:          pulumi.String(ec2_instance_type),
 			KeyName:               pulumi.String(ssh_key),
@@ -526,6 +527,7 @@ sudo chmod 640 /opt/csye6225/application.properties
 
 		// define the autoscaling group
 		asg, err := autoscaling.NewGroup(ctx, "auto-scaling-group", &autoscaling.GroupArgs{
+			Name:               pulumi.String("webapp-auto-scaling-group"),
 			DesiredCapacity:    pulumi.Int(1),
 			MaxSize:            pulumi.Int(3),
 			MinSize:            pulumi.Int(1),
@@ -620,8 +622,18 @@ sudo chmod 640 /opt/csye6225/application.properties
 			return err
 		}
 
-		// Add a Listener to our Load Balancer
-		_, err = alb.NewListener(ctx, "listener", &alb.ListenerArgs{
+
+		ssl_certificate, err := acm.LookupCertificate(ctx, &acm.LookupCertificateArgs{
+			Domain: domain_name,
+			Statuses: []string{
+				"ISSUED",
+			},
+		}, nil)
+		if err != nil {
+			return err
+		}
+
+		_, err = alb.NewListener(ctx, "HTTPS listener", &alb.ListenerArgs{
 			DefaultActions: alb.ListenerDefaultActionArray{
 				alb.ListenerDefaultActionArgs{
 					Type:           pulumi.String("forward"),
@@ -629,8 +641,9 @@ sudo chmod 640 /opt/csye6225/application.properties
 				},
 			},
 			LoadBalancerArn: loadBalancer.Arn,
-			Port:            pulumi.Int(80),
-			Protocol:        pulumi.String("HTTP"),
+			CertificateArn:  pulumi.String(ssl_certificate.Arn),
+			Port:            pulumi.Int(443),
+			Protocol:        pulumi.String("HTTPS"),
 		}, pulumi.DependsOn([]pulumi.Resource{loadBalancer}))
 		if err != nil {
 			return err
